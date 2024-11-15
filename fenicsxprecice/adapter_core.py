@@ -87,7 +87,7 @@ def determine_function_type(input_obj):
 
 def convert_fenicsx_to_precice(fenicsx_function, local_ids):
     """
-    Converts data of type dolfin.Function into Numpy array for all x and y coordinates on the boundary.
+    Converts data of type dolfinx.Function into Numpy array for all x and y coordinates on the boundary.
 
     Parameters
     ----------
@@ -108,8 +108,8 @@ def convert_fenicsx_to_precice(fenicsx_function, local_ids):
     precice_data = []
     # sampled_data = fenicsx_function.x.array  # that works only for 1st order elements where dofs = grid points
     # TODO begin dirty fix. See https://github.com/precice/fenicsx-adapter/issues/17 for details.
-    x_mesh = fenicsx_function.function_space.mesh.geometry.x
-    x_dofs = fenicsx_function.function_space.tabulate_dof_coordinates()
+    x_mesh = fenicsx_function.function_space.mesh.geometry.x # 
+    x_dofs = fenicsx_function.function_space.tabulate_dof_coordinates() # returns coordinates of the degrees of freedom
     mask = []  # where dof coordinate == mesh coordinate
     for i in range(x_dofs.shape[0]):
         for j in range(x_mesh.shape[0]):

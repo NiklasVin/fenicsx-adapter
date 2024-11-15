@@ -52,10 +52,14 @@ class Adapter:
 
         # Setup up MPI communicator
         self._comm = mpi_comm
-
-        self._interface = precice.Interface(self._config.get_participant_name(), self._config.get_config_file_name(),
-                                            self._comm.Get_rank(), self._comm.Get_size())
-
+        
+        self._participant = precice.Participant(
+            self._config.get_participant_name(),
+            self._config.get_config_file_name(),
+            self._comm.Get_rank(),
+            self._comm.Get_size()
+        )
+        
         # FEniCSx related quantities
         self._read_function_space = None  # initialized later
         self._write_function_space = None  # initialized later
@@ -141,15 +145,15 @@ class Adapter:
         assert (self._coupling_type is CouplingMode.UNI_DIRECTIONAL_READ_COUPLING or
                 CouplingMode.BI_DIRECTIONAL_COUPLING)
 
-        read_data_id = self._interface.get_data_id(self._config.get_read_data_name(),
-                                                   self._interface.get_mesh_id(self._config.get_coupling_mesh_name()))
+        read_data_id = self._participant.get_data_id(self._config.get_read_data_name(),
+                                                   self._participant.get_mesh_id(self._config.get_coupling_mesh_name()))
 
         read_data = None
 
         if self._read_function_type is FunctionType.SCALAR:
-            read_data = self._interface.read_block_scalar_data(read_data_id, self._precice_vertex_ids)
+            read_data = self._participant.read_block_scalar_data(read_data_id, self._precice_vertex_ids)
         elif self._read_function_type is FunctionType.VECTOR:
-            read_data = self._interface.read_block_vector_data(read_data_id, self._precice_vertex_ids)
+            read_data = self._participant.read_block_vector_data(read_data_id, self._precice_vertex_ids)
 
         read_data = {tuple(key): value for key, value in zip(self._fenicsx_vertices.get_coordinates(), read_data)}
 
@@ -169,28 +173,26 @@ class Adapter:
         assert (self._coupling_type is CouplingMode.UNI_DIRECTIONAL_WRITE_COUPLING or
                 CouplingMode.BI_DIRECTIONAL_COUPLING)
 
-        w_func = write_function
+        w_func = write_function.copy()
 
         # Check that the function provided lives on the same function space provided during initialization
         assert (self._write_function_type == determine_function_type(w_func))
         # TODO this raises AssertionError, not sure why. I just commented it out, still works...
         # assert (write_function.function_space == self._write_function_space)
 
-        write_data_id = self._interface.get_data_id(self._config.get_write_data_name(),
-                                                    self._interface.get_mesh_id(self._config.get_coupling_mesh_name()))
+        #write_data_id = self._participant.get_data_id(self._config.get_write_data_name(),
+        #                                            self._participant.get_mesh_id(self._config.get_coupling_mesh_name()))
+        
 
         write_function_type = determine_function_type(write_function)
         assert (write_function_type in list(FunctionType))
         write_data = convert_fenicsx_to_precice(write_function, self._fenicsx_vertices.get_ids())
-        if write_function_type is FunctionType.SCALAR:
-            assert (write_function.function_space.num_sub_spaces == 0)
-            write_data = np.squeeze(write_data)  # TODO dirty solution
-            self._interface.write_block_scalar_data(write_data_id, self._precice_vertex_ids, write_data)
-        elif write_function_type is FunctionType.VECTOR:
-            assert (write_function.function_space.num_sub_spaces > 0)
-            self._interface.write_block_vector_data(write_data_id, self._precice_vertex_ids, write_data)
-        else:
-            raise Exception("write_function provided is neither VECTOR nor SCALAR type")
+        self._participant.write_data(
+            self._config.get_coupling_mesh_name(),
+            self._config.get_write_data_name(),
+            self._precice_vertex_ids,
+            write_data
+        )
 
     def initialize(self, coupling_subdomain, read_function_space=None, write_object=None):
         """
@@ -279,7 +281,7 @@ class Adapter:
         if self._fenicsx_dims != 2:
             raise Exception("Currently the fenicsx-adapter only supports 2D cases")
 
-        if self._fenicsx_dims != self._interface.get_dimensions():
+        if self._fenicsx_dims != self._participant.get_mesh_dimensions(self._config.get_coupling_mesh_name()):
             raise Exception("Dimension of preCICE setup and FEniCSx do not match")
 
         # Set vertices on the coupling subdomain for this rank
@@ -288,28 +290,25 @@ class Adapter:
         self._fenicsx_vertices.set_coordinates(coords)
 
         # Set up mesh in preCICE
-        self._precice_vertex_ids = self._interface.set_mesh_vertices(self._interface.get_mesh_id(
-            self._config.get_coupling_mesh_name()), self._fenicsx_vertices.get_coordinates())
+        self._precice_vertex_ids = self._participant.set_mesh_vertices(
+            self._config.get_coupling_mesh_name(), self._fenicsx_vertices.get_coordinates())
 
-        precice_dt = self._interface.initialize()
-
-        if self._interface.is_action_required(precice.action_write_initial_data()):
+        if self._participant.requires_initial_data():
             if not write_function:
-                raise Exception("Non-standard initialization requires a write_function")
+                raise Exception("preCICE requires you to write initial data. Please provide a write_function to initialize(...)")
             self.write_data(write_function)
-            self._interface.mark_action_fulfilled(precice.action_write_initial_data())
 
-        self._interface.initialize_data()
+        self._participant.initialize()
 
         return precice_dt
 
-    def store_checkpoint(self, user_u, t, n):
+    def store_checkpoint(self, payload, t, n):
         """
         Defines an object of class SolverState which stores the current state of the variable and the time stamp.
 
         Parameters
         ----------
-        user_u : FEniCSx Function
+        payload : FEniCSx Function
             Current state of the physical variable of interest for this participant.
         t : double
             Current simulation time.
@@ -320,11 +319,11 @@ class Adapter:
             assert (self.is_time_window_complete())
 
         logger.debug("Store checkpoint")
-        my_u = user_u.copy()
+        my_u = payload.copy()
         # making sure that the FEniCSx function provided by user is not directly accessed by the Adapter
-        assert (my_u != user_u)
+        assert (my_u != payload)
         self._checkpoint = SolverState(my_u, t, n)
-        self._interface.mark_action_fulfilled(self.action_write_iteration_checkpoint())
+        self._participant.mark_action_fulfilled(self.action_write_iteration_checkpoint())
 
     def retrieve_checkpoint(self):
         """
@@ -341,7 +340,7 @@ class Adapter:
         """
         assert (not self.is_time_window_complete())
         logger.debug("Restore solver state")
-        self._interface.mark_action_fulfilled(self.action_read_iteration_checkpoint())
+        self._participant.mark_action_fulfilled(self.action_read_iteration_checkpoint())
         return self._checkpoint.get_state()
 
     def advance(self, dt):
@@ -363,7 +362,7 @@ class Adapter:
             Maximum length of timestep to be computed by solver.
         """
         self._first_advance_done = True
-        max_dt = self._interface.advance(dt)
+        max_dt = self._participant.advance(dt)
         return max_dt
 
     def finalize(self):
@@ -374,7 +373,7 @@ class Adapter:
         -----
         Refer finalize() in https://github.com/precice/python-bindings/blob/develop/precice.pyx
         """
-        self._interface.finalize()
+        self._participant.finalize()
 
     def get_participant_name(self):
         """
@@ -398,7 +397,7 @@ class Adapter:
         tag : bool
             True if coupling is still going on and False if coupling has finished.
         """
-        return self._interface.is_coupling_ongoing()
+        return self._participant.is_coupling_ongoing()
 
     def is_time_window_complete(self):
         """
@@ -413,7 +412,7 @@ class Adapter:
         tag : bool
             True if implicit coupling in the time window has converged and False if not converged yet.
         """
-        return self._interface.is_time_window_complete()
+        return self._participant.is_time_window_complete()
 
     def is_action_required(self, action):
         """
@@ -433,7 +432,7 @@ class Adapter:
         tag : bool
             True if action is required and False if action is not required.
         """
-        return self._interface.is_action_required(action)
+        return self._participant.is_action_required(action)
 
     def action_write_iteration_checkpoint(self):
         """
