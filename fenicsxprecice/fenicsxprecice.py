@@ -87,6 +87,9 @@ class Adapter:
 
         # Problem dimension in FEniCSx
         self._fenicsx_dims = None
+        
+        
+        self._empty_rank = True
 
     def create_coupling_expression(self):
         """
@@ -126,7 +129,7 @@ class Adapter:
     def get_point_sources(self, data):
         raise Exception("PointSources are not implemented for the FEniCSx adapter.")
 
-    def read_data(self):
+    def read_data(self, dt):
         """
         Read data from preCICE. Data is generated depending on the type of the read function (Scalar or Vector).
         For a scalar read function the data is a numpy array with shape (N) where N = number of coupling vertices
@@ -145,18 +148,21 @@ class Adapter:
         assert (self._coupling_type is CouplingMode.UNI_DIRECTIONAL_READ_COUPLING or
                 CouplingMode.BI_DIRECTIONAL_COUPLING)
 
-        read_data_id = self._participant.get_data_id(self._config.get_read_data_name(),
-                                                   self._participant.get_mesh_id(self._config.get_coupling_mesh_name()))
+        read_data=None
+        
+        if not self._empty_rank:
+            read_data = self._participant.read_data(
+                self._config.get_coupling_mesh_name(),
+                self._config.get_read_data_name(),
+                self._precice_vertex_ids,
+                dt
+            )
+            #TODO: MPI stuff
+            read_data = {tuple(key): value for key, value in zip(self._fenicsx_vertices.get_coordinates(), read_data)}
 
-        read_data = None
-
-        if self._read_function_type is FunctionType.SCALAR:
-            read_data = self._participant.read_block_scalar_data(read_data_id, self._precice_vertex_ids)
-        elif self._read_function_type is FunctionType.VECTOR:
-            read_data = self._participant.read_block_vector_data(read_data_id, self._precice_vertex_ids)
-
-        read_data = {tuple(key): value for key, value in zip(self._fenicsx_vertices.get_coordinates(), read_data)}
-
+        else:
+            pass
+    
         return copy.deepcopy(read_data)
 
     def write_data(self, write_function):
@@ -270,6 +276,11 @@ class Adapter:
             # Ensure that function spaces of read and write functions are defined using the same mesh
             self._write_function_type = determine_function_type(write_function_space)
             self._write_function_space = write_function_space
+            
+        if self._fenicsx_vertices.get_ids().size > 0:
+            self._empty_rank = False
+        else:
+            print("Rank {} has no part of coupling boundary.".format(self._comm.Get_rank()))
 
         self._fenicsx_dims = function_space.mesh.geometry.dim
 
@@ -411,57 +422,6 @@ class Adapter:
             True if implicit coupling in the time window has converged and False if not converged yet.
         """
         return self._participant.is_time_window_complete()
-
-    def is_action_required(self, action):
-        """
-        Tag to check if a particular preCICE action is required.
-
-        Parameters
-        ----------
-        action : string
-            Name of the preCICE action.
-
-        Notes
-        -----
-        Refer is_action_required(action) in https://github.com/precice/python-bindings/blob/develop/precice.pyx
-
-        Returns
-        -------
-        tag : bool
-            True if action is required and False if action is not required.
-        """
-        return self._participant.is_action_required(action)
-
-    def action_write_iteration_checkpoint(self):
-        """
-        Get name of action to convey to preCICE that a checkpoint has been written.
-
-        Notes
-        -----
-        Refer action_write_iteration_checkpoint() in https://github.com/precice/python-bindings/blob/develop/precice.pyx
-
-        Returns
-        -------
-        action : string
-            Name of action related to writing a checkpoint.
-        """
-        return precice.action_write_iteration_checkpoint()
-
-    def action_read_iteration_checkpoint(self):
-        """
-        Get name of action to convey to preCICE that a checkpoint has been read and the state of the system has been
-        restored to that checkpoint.
-
-        Notes
-        -----
-        Refer action_read_iteration_checkpoint() in https://github.com/precice/python-bindings/blob/develop/precice.pyx
-
-        Returns
-        -------
-        action : string
-            Name of action related to reading a checkpoint.
-        """
-        return precice.action_read_iteration_checkpoint()
 
     def get_max_time_step_size(self):
         return self._participant.get_max_time_step_size()
