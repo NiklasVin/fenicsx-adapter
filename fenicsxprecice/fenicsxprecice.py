@@ -300,8 +300,6 @@ class Adapter:
 
         self._participant.initialize()
 
-        return precice_dt
-
     def store_checkpoint(self, payload, t, n):
         """
         Defines an object of class SolverState which stores the current state of the variable and the time stamp.
@@ -464,3 +462,6 @@ class Adapter:
             Name of action related to reading a checkpoint.
         """
         return precice.action_read_iteration_checkpoint()
+
+    def get_max_time_step_size(self):
+        return self._participant.get_max_time_step_size()
