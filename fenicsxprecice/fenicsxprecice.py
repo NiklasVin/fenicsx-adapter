@@ -276,13 +276,24 @@ class Adapter:
             # Ensure that function spaces of read and write functions are defined using the same mesh
             self._write_function_type = determine_function_type(write_function_space)
             self._write_function_space = write_function_space
+        
+        
+        # Set vertices on the coupling subdomain for this rank
+        self._fenicsx_dims = function_space.mesh.geometry.dim
+        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)
+        self._fenicsx_vertices.set_ids(ids)
+        self._fenicsx_vertices.set_coordinates(coords)
+
+        # Set up mesh in preCICE
+        self._precice_vertex_ids = self._participant.set_mesh_vertices(
+            self._config.get_coupling_mesh_name(), self._fenicsx_vertices.get_coordinates())
+
             
         if self._fenicsx_vertices.get_ids().size > 0:
             self._empty_rank = False
         else:
             print("Rank {} has no part of coupling boundary.".format(self._comm.Get_rank()))
 
-        self._fenicsx_dims = function_space.mesh.geometry.dim
 
         # Ensure that function spaces of read and write functions use the same mesh
         if self._coupling_type is CouplingMode.BI_DIRECTIONAL_COUPLING:
@@ -294,15 +305,6 @@ class Adapter:
 
         if self._fenicsx_dims != self._participant.get_mesh_dimensions(self._config.get_coupling_mesh_name()):
             raise Exception("Dimension of preCICE setup and FEniCSx do not match")
-
-        # Set vertices on the coupling subdomain for this rank
-        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)
-        self._fenicsx_vertices.set_ids(ids)
-        self._fenicsx_vertices.set_coordinates(coords)
-
-        # Set up mesh in preCICE
-        self._precice_vertex_ids = self._participant.set_mesh_vertices(
-            self._config.get_coupling_mesh_name(), self._fenicsx_vertices.get_coordinates())
 
         if self._participant.requires_initial_data():
             if not write_function:
@@ -332,7 +334,6 @@ class Adapter:
         # making sure that the FEniCSx function provided by user is not directly accessed by the Adapter
         assert (my_u != payload)
         self._checkpoint = SolverState(my_u, t, n)
-        self._participant.mark_action_fulfilled(self.action_write_iteration_checkpoint())
 
     def retrieve_checkpoint(self):
         """
@@ -349,7 +350,6 @@ class Adapter:
         """
         assert (not self.is_time_window_complete())
         logger.debug("Restore solver state")
-        self._participant.mark_action_fulfilled(self.action_read_iteration_checkpoint())
         return self._checkpoint.get_state()
 
     def advance(self, dt):
@@ -425,3 +425,9 @@ class Adapter:
 
     def get_max_time_step_size(self):
         return self._participant.get_max_time_step_size()
+    
+    def requires_writing_checkpoint(self):
+        return self._participant.requires_writing_checkpoint()
+    
+    def requires_reading_checkpoint(self):
+        return self._participant.requires_reading_checkpoint()
