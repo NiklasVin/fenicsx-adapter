@@ -2,7 +2,8 @@
 This module consists of helper functions used in the Adapter class. Names of the functions are self explanatory
 """
 
-from dolfinx.fem import FunctionSpace, Function
+#from dolfinx.fem import FunctionSpace, Function
+from dolfinx import fem, geometry
 import numpy as np
 from enum import Enum
 import logging
@@ -69,12 +70,12 @@ def determine_function_type(input_obj):
     tag : bool
         0 if input_function is SCALAR and 1 if input_function is VECTOR.
     """
-    if isinstance(input_obj, FunctionSpace):  # scalar-valued functions have rank 0 is FEniCSx
+    if isinstance(input_obj, fem.FunctionSpace):  # scalar-valued functions have rank 0 is FEniCSx
         if input_obj.num_sub_spaces == 0:
             return FunctionType.SCALAR
         elif input_obj.num_sub_spaces == 2:
             return FunctionType.VECTOR
-    elif isinstance(input_obj, Function):
+    elif isinstance(input_obj, fem.Function):
         if len(input_obj.x.array.shape) == 1:
             return FunctionType.SCALAR
         elif input_obj.x.array.shape[1] > 1:
@@ -102,10 +103,11 @@ def convert_fenicsx_to_precice(fenicsx_function, local_ids):
         Array of FEniCSx function values at each point on the boundary.
     """
 
-    if not isinstance(fenicsx_function, Function):
+    if not isinstance(fenicsx_function, fem.Function):
         raise Exception("Cannot handle data type {}".format(type(fenicsx_function)))
 
     precice_data = []
+
     # sampled_data = fenicsx_function.x.array  # that works only for 1st order elements where dofs = grid points
     # TODO begin dirty fix. See https://github.com/precice/fenicsx-adapter/issues/17 for details.
     x_mesh = fenicsx_function.function_space.mesh.geometry.x # 
@@ -128,6 +130,50 @@ def convert_fenicsx_to_precice(fenicsx_function, local_ids):
     else:
         precice_data = np.array([])
 
+    return np.array(precice_data)
+
+
+def convert_fenicsx_to_precice_coordinateBased(fenicsx_function, local_coords):
+    """
+    Converts data of type dolfinx.Function into Numpy array for all x and y coordinates on the boundary.
+
+    Parameters
+    ----------
+    fenicsx_function : FEniCSx function
+        A FEniCSx function referring to a physical variable in the problem.
+    local_coords: numpy array
+        Array of local coordinates of vertices on the coupling interface and owned by this rank.
+
+    Returns
+    -------
+    precice_data : array_like
+        Array of FEniCSx function values at each point on the boundary.
+    """
+
+    if not isinstance(fenicsx_function, fem.Function):
+        raise Exception("Cannot handle data type {}".format(type(fenicsx_function)))
+
+    mesh = fenicsx_function.function_space.mesh
+    
+    # this evaluation is a bit annoying, see:
+    # https://github.com/FEniCS/dolfinx/blob/main/python/test/unit/fem/test_function.py#L63
+
+    # for fast function evaluation
+    bb_tree = geometry.bb_tree(mesh, mesh.geometry.dim)
+    
+    cells = []
+    points = []
+    
+    # Find cells whose bounding-box collide with the the points
+    cell_candidates = geometry.compute_collisions_points(bb_tree, local_coords)
+    # Choose one of the cells that contains the point
+    colliding_cells = geometry.compute_colliding_cells(mesh, cell_candidates, local_coords)
+    for i, point in enumerate(local_coords):
+        if len(colliding_cells.links(i)) > 0:
+            points.append(point)
+            cells.append(colliding_cells.links(i)[0])
+    
+    precice_data = fenicsx_function.eval(points, cells)
     return np.array(precice_data)
 
 
@@ -156,13 +202,12 @@ def get_fenicsx_vertices(function_space, coupling_subdomain, dims):
 
     # Get mesh from FEniCSx function space
     mesh = function_space.mesh
-
+    
     # Get coordinates and IDs of all vertices of the mesh which lie on the coupling boundary.
     try:
-        on_subdomain = coupling_subdomain(mesh.geometry.x.T)
-        ids, = np.where(on_subdomain)
+        ids = fem.locate_dofs_geometrical(function_space, coupling_subdomain)
         if dims == 2:
-            coords = mesh.geometry.x[ids][:, :2]
+            coords = function_space.tabulate_dof_coordinates()[ids] # we get 3d coordinates here
         else:
             coords = np.array([])
     except Exception as e:  # fall back to old method  # TODO is that too general? Better use, e.g., IndexError here?
@@ -177,4 +222,5 @@ def get_fenicsx_vertices(function_space, coupling_subdomain, dims):
                     coords.append([v[0], v[1]])
         ids = np.array(ids)
         coords = np.array(coords)
+        
     return ids, coords

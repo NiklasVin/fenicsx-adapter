@@ -7,7 +7,7 @@ import numpy as np
 from .config import Config
 import logging
 import precice
-from .adapter_core import FunctionType, determine_function_type, convert_fenicsx_to_precice, get_fenicsx_vertices, CouplingMode, Vertices
+from .adapter_core import FunctionType, determine_function_type, convert_fenicsx_to_precice, get_fenicsx_vertices, CouplingMode, Vertices, convert_fenicsx_to_precice_coordinateBased
 from .expression_core import SegregatedRBFInterpolationExpression
 from .solverstate import SolverState
 from dolfinx.fem import Function, FunctionSpace
@@ -119,7 +119,7 @@ class Adapter:
         coupling_expression : Object of class dolfinx.functions.expression.Expression
             Reference to object of class GeneralInterpolationExpression or ExactInterpolationExpression.
         data : dict_like
-            The coupling data. A dictionary containing nodal data with vertex coordinates as key and associated data as
+            The coupling data. A dictionary containing the values of the vertex coordinates as key and associated data as
             value.
         """
         vertices = np.array(list(data.keys()))
@@ -192,7 +192,7 @@ class Adapter:
 
         write_function_type = determine_function_type(write_function)
         assert (write_function_type in list(FunctionType))
-        write_data = convert_fenicsx_to_precice(write_function, self._fenicsx_vertices.get_ids())
+        write_data = convert_fenicsx_to_precice_coordinateBased(write_function, self._fenicsx_vertices.get_coordinates())
         self._participant.write_data(
             self._config.get_coupling_mesh_name(),
             self._config.get_write_data_name(),
@@ -280,13 +280,15 @@ class Adapter:
         
         # Set vertices on the coupling subdomain for this rank
         self._fenicsx_dims = function_space.mesh.geometry.dim
-        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)
+        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)  # returns 3d coordinates!!!!!!! (necessary later for writing the data!)
+                                                                                                    # this isnt a problem in update_coupling_expression, because in this function
+                                                                                                    # , the two first dimensions are extracted. Exactly what we want!
         self._fenicsx_vertices.set_ids(ids)
         self._fenicsx_vertices.set_coordinates(coords)
 
         # Set up mesh in preCICE
         self._precice_vertex_ids = self._participant.set_mesh_vertices(
-            self._config.get_coupling_mesh_name(), self._fenicsx_vertices.get_coordinates())
+            self._config.get_coupling_mesh_name(), self._fenicsx_vertices.get_coordinates()[:, :2]) # give preCICE only 2D coordinates
 
             
         if self._fenicsx_vertices.get_ids().size > 0:
