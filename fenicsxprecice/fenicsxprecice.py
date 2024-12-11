@@ -280,7 +280,7 @@ class Adapter:
         
         # Set vertices on the coupling subdomain for this rank
         self._fenicsx_dims = function_space.mesh.geometry.dim
-        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)  # returns 3d coordinates!!!!!!! (necessary later for writing the data!)
+        ids, coords = get_fenicsx_vertices(function_space, coupling_subdomain, self._fenicsx_dims)  # returns 3d coordinates (necessary later for writing the data!)
                                                                                                     # this isnt a problem in update_coupling_expression, because in this function
                                                                                                     # , the two first dimensions are extracted. Exactly what we want!
         self._fenicsx_vertices.set_ids(ids)
