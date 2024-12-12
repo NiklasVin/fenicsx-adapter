@@ -86,53 +86,6 @@ def determine_function_type(input_obj):
         raise Exception("Error determining type of given dolfin FunctionSpace")
 
 
-def convert_fenicsx_to_precice(fenicsx_function, local_ids):
-    """
-    Converts data of type dolfinx.Function into Numpy array for all x and y coordinates on the boundary.
-
-    Parameters
-    ----------
-    fenicsx_function : FEniCSx function
-        A FEniCSx function referring to a physical variable in the problem.
-    local_ids: numpy array
-        Array of local indices of vertices on the coupling interface and owned by this rank.
-
-    Returns
-    -------
-    precice_data : array_like
-        Array of FEniCSx function values at each point on the boundary.
-    """
-
-    if not isinstance(fenicsx_function, fem.Function):
-        raise Exception("Cannot handle data type {}".format(type(fenicsx_function)))
-
-    precice_data = []
-
-    # sampled_data = fenicsx_function.x.array  # that works only for 1st order elements where dofs = grid points
-    # TODO begin dirty fix. See https://github.com/precice/fenicsx-adapter/issues/17 for details.
-    x_mesh = fenicsx_function.function_space.mesh.geometry.x # 
-    x_dofs = fenicsx_function.function_space.tabulate_dof_coordinates() # returns coordinates of the degrees of freedom
-    mask = []  # where dof coordinate == mesh coordinate
-    for i in range(x_dofs.shape[0]):
-        for j in range(x_mesh.shape[0]):
-            if np.allclose(x_dofs[i, :], x_mesh[j, :], 1e-15):
-                mask.append(i)
-                break
-    sampled_data = fenicsx_function.x.array[mask]
-    # end dirty fix
-
-    if len(local_ids):
-        if fenicsx_function.function_space.num_sub_spaces > 0:  # function space is VectorFunctionSpace
-            raise Exception("Functions from VectorFunctionSpaces are currently not supported.")
-        else:  # function space is FunctionSpace (scalar)
-            for lid in local_ids:
-                precice_data.append(sampled_data[lid])
-    else:
-        precice_data = np.array([])
-
-    return np.array(precice_data)
-
-
 def convert_fenicsx_to_precice_coordinateBased(fenicsx_function, local_coords):
     """
     Converts data of type dolfinx.Function into Numpy array for all x and y coordinates on the boundary.

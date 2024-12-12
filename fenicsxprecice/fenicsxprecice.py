@@ -7,7 +7,7 @@ import numpy as np
 from .config import Config
 import logging
 import precice
-from .adapter_core import FunctionType, determine_function_type, convert_fenicsx_to_precice, get_fenicsx_vertices, CouplingMode, Vertices, convert_fenicsx_to_precice_coordinateBased
+from .adapter_core import FunctionType, determine_function_type, get_fenicsx_vertices, CouplingMode, Vertices, convert_fenicsx_to_precice_coordinateBased
 from .expression_core import SegregatedRBFInterpolationExpression
 from .solverstate import SolverState
 from dolfinx.fem import Function, FunctionSpace
@@ -183,8 +183,7 @@ class Adapter:
 
         # Check that the function provided lives on the same function space provided during initialization
         assert (self._write_function_type == determine_function_type(w_func))
-        # TODO this raises AssertionError, not sure why. I just commented it out, still works...
-        # assert (write_function.function_space == self._write_function_space)
+        assert (write_function.function_space == self._write_function_space)
 
         #write_data_id = self._participant.get_data_id(self._config.get_write_data_name(),
         #                                            self._participant.get_mesh_id(self._config.get_coupling_mesh_name()))
