@@ -1,40 +1,24 @@
 """
-The basic example is taken from "Langtangen, Hans Petter, and Anders Logg. Solving PDEs in Python: The FEniCS
-Tutorial I. Springer International Publishing, 2016."
-
-The example code has been extended with preCICE API calls and mixed boundary conditions to allow for a Dirichlet-Neumann
-coupling of two separate heat equations. It also has been adapted to be compatible with FEniCSx.
-
-The original source code can be found on https://jsdokken.com/dolfinx-tutorial/chapter2/heat_code.html.
-
-Heat equation with Dirichlet conditions. (Dirichlet problem)
-  u'= Laplace(u) + f  in the unit square [0,1] x [0,1]
-  u = u_C             on the coupling boundary at x = 1
-  u = u_D             on the remaining boundary
-  u = u_0             at t = 0
-  u = 1 + x^2 + alpha*y^2 + \beta*t
-  f = beta - 2 - 2*alpha
-
-Heat equation with mixed boundary conditions. (Neumann problem)
-  u'= Laplace(u) + f  in the shifted unit square [1,2] x [0,1]
-  du/dn = f_N         on the coupling boundary at x = 1
-  u = u_D             on the remaining boundary
-  u = u_0             at t = 0
-  u = 1 + x^2 + alpha*y^2 + \beta*t
-  f = beta - 2 - 2*alpha
+This code is mostly taken from: https://jsdokken.com/dolfinx-tutorial/chapter2/heat_equation.html
 """
 
-from __future__ import print_function, division
-from mpi4py import MPI
-from dolfinx.fem import Function, FunctionSpace, Expression, Constant, dirichletbc, locate_dofs_geometrical
-from dolfinx.fem.petsc import LinearProblem
-from dolfinx.io import XDMFFile
-from ufl import TrialFunction, TestFunction, dx, ds, dot, grad, inner, lhs, rhs, FiniteElement, VectorElement
-from fenicsxprecice import Adapter
-from errorcomputation import compute_errors
-from my_enums import ProblemType, DomainPart
+import basix.ufl
+from petsc4py import PETSc
+import ufl
+from dolfinx import mesh, fem
+from dolfinx.fem.petsc import assemble_matrix, assemble_vector, apply_lifting, create_vector, set_bc, LinearProblem
+from ufl import TrialFunction, TestFunction, inner, dx, grad, ds
+import basix
+
 import argparse
 import numpy as np
+from mpi4py import MPI
+import sympy as sp
+
+from fenicsxprecice import Adapter
+from errorcomputation import compute_errors
+
+from my_enums import ProblemType, DomainPart
 from problem_setup import get_geometry
 
 
@@ -48,206 +32,214 @@ def determine_gradient(V_g, u):
     w = TrialFunction(V_g)
     v = TestFunction(V_g)
 
-    a = inner(w, v) * dx
-    L = inner(grad(u), v) * dx
+    a = inner(w, v) * ufl.dx
+    L = inner(grad(u), v) * ufl.dx
     problem = LinearProblem(a, L)
     return problem.solve()
 
 
+# Parse arguments
 parser = argparse.ArgumentParser(description="Solving heat equation for simple or complex interface case")
-command_group = parser.add_mutually_exclusive_group(required=True)
-command_group.add_argument("-d", "--dirichlet", help="create a dirichlet problem", dest="dirichlet",
-                           action="store_true")
-command_group.add_argument("-n", "--neumann", help="create a neumann problem", dest="neumann", action="store_true")
-parser.add_argument("-e", "--error-tol", help="set error tolerance", type=float, default=10**-6,)
-
+parser.add_argument("participantName", help="Name of the solver.", type=str, choices=[p.value for p in ProblemType])
+parser.add_argument("-e", "--error-tol", help="set error tolerance", type=float, default=10**-8,)
 args = parser.parse_args()
-
-fenics_dt = .1  # time step size
-# Error is bounded by coupling accuracy. In theory we would obtain the analytical solution.
+# Init variables with arguments
+participant_name = args.participantName
 error_tol = args.error_tol
 
-alpha = 3  # parameter alpha
-beta = 1.2  # parameter beta
+t = 0
+fenics_dt = 0.1
+alpha = 3
+beta = 1.2
 
-if args.dirichlet and not args.neumann:
+
+# define the domain
+
+if participant_name == ProblemType.DIRICHLET.value:
     problem = ProblemType.DIRICHLET
     domain_part = DomainPart.LEFT
-elif args.neumann and not args.dirichlet:
+elif participant_name == ProblemType.NEUMANN.value:
     problem = ProblemType.NEUMANN
     domain_part = DomainPart.RIGHT
 
-mesh, coupling_boundary, remaining_boundary = get_geometry(MPI.COMM_WORLD, domain_part)
 
-# Define function space using mesh
-scalar_element = FiniteElement("P", mesh.ufl_cell(), 2)
-vector_element = VectorElement("P", mesh.ufl_cell(), 1)
-V = FunctionSpace(mesh, scalar_element)
-V_g = FunctionSpace(mesh, vector_element)
-W = V_g.sub(0).collapse()[0]
+# create domain and function space
+domain, coupling_boundary, remaining_boundary = get_geometry(domain_part)
+V = fem.functionspace(domain, ("Lagrange", 1))
+element = basix.ufl.element("Lagrange", domain.topology.cell_name(), 1, shape=(domain.geometry.dim,))
+V_g = fem.functionspace(domain, element)
+W, map_to_W = V_g.sub(0).collapse()
 
-# Define boundary conditions
-
-
-class Expression_u_D:
-    def __init__(self):
-        self.t = 0.0
-
-    def eval(self, x):
-        return np.full(x.shape[1], 1 + x[0] * x[0] + alpha * x[1] * x[1] + beta * self.t)
+# Define the exact solution
 
 
-u_D = Expression_u_D()
-u_D_function = Function(V)
-u_D_function.interpolate(u_D.eval)
+class exact_solution():
+    def __init__(self, alpha, beta, t):
+        self.alpha = alpha
+        self.beta = beta
+        self.t = t
+
+    def __call__(self, x):
+        return 1 + x[0]**2 + self.alpha * x[1]**2 + self.beta * self.t
+
+
+u_exact = exact_solution(alpha, beta, t)
+
+# Define the boundary condition
+bcs = []
+u_D = fem.Function(V)
+u_D.interpolate(u_exact)
+tdim = domain.topology.dim
+fdim = tdim - 1
+domain.topology.create_connectivity(fdim, tdim)
+# dofs for the coupling boundary
+dofs_coupling = fem.locate_dofs_geometrical(V, coupling_boundary)
+# dofs for the remaining boundary. Can be directly set to u_D
+dofs_remaining = fem.locate_dofs_geometrical(V, remaining_boundary)
+bc_D = fem.dirichletbc(u_D, dofs_remaining)
+bcs.append(bc_D)
+
 
 if problem is ProblemType.DIRICHLET:
     # Define flux in x direction
-    class Expression_f_N:
-        def __init__(self):
-            pass
+    f_N = fem.Function(W)
+    f_N.interpolate(lambda x: 2 * x[0])
 
-        def eval(self, x):
-            return np.full(x.shape[1], 2 * x[0])
 
-    f_N = Expression_f_N()
-    f_N_function = Function(V)
-    f_N_function.interpolate(f_N.eval)
+u_n = fem.Function(V)  # IV and solution u for the n-th time step
+u_n.interpolate(u_exact)
 
-# Define initial value
-u_n = Function(V, name="Temperature")
-u_n.interpolate(u_D.eval)
-
+# initialise precice
 precice, precice_dt, initial_data = None, 0.0, None
-
-# Initialize the adapter according to the specific participant
 if problem is ProblemType.DIRICHLET:
-    precice = Adapter(MPI.COMM_WORLD, adapter_config_filename="precice-adapter-config-D.json")
-    precice_dt = precice.initialize(coupling_boundary, read_function_space=V, write_object=f_N_function)
+    precice = Adapter(adapter_config_filename="precice-adapter-config-D.json", mpi_comm=MPI.COMM_WORLD)
+else:
+    precice = Adapter(adapter_config_filename="precice-adapter-config-N.json", mpi_comm=MPI.COMM_WORLD)
+
+
+if problem is ProblemType.DIRICHLET:
+    precice.initialize(coupling_boundary, read_function_space=V, write_object=f_N)
 elif problem is ProblemType.NEUMANN:
-    precice = Adapter(MPI.COMM_WORLD, adapter_config_filename="precice-adapter-config-N.json")
-    precice_dt = precice.initialize(coupling_boundary, read_function_space=W, write_object=u_D_function)
+    precice.initialize(coupling_boundary, read_function_space=W, write_object=u_D)
 
-dt = Constant(mesh, 0.0)
-dt.value = np.min([fenics_dt, precice_dt])
-
-# Define variational problem
-u = TrialFunction(V)
-v = TestFunction(V)
+# get precice's dt
+precice_dt = precice.get_max_time_step_size()
+dt = np.min([fenics_dt, precice_dt])
 
 
-class Expression_f:
-    def __init__(self):
-        self.t = 0.0
+# Define the variational formualation
 
-    def eval(self, x):
-        return np.full(x.shape[1], beta - 2 - 2 * alpha)
+# As $f$ is a constant independent of $t$, we can define it as a constant.
+f = fem.Constant(domain, beta - 2 - 2 * alpha)
 
+# We can now create our variational formulation, with the bilinear form `a` and  linear form `L`.
 
-f = Expression_f()
-f_function = Function(V)
-F = u * v / dt * dx + dot(grad(u), grad(v)) * dx - (u_n / dt + f_function) * v * dx
+u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+F = u * v * ufl.dx + dt * ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx - (u_n + dt * f) * v * ufl.dx
 
-dofs_remaining = locate_dofs_geometrical(V, remaining_boundary)
-bcs = [dirichletbc(u_D_function, dofs_remaining)]
-
+# create a coupling expression for the coupling_boundary and modify variational problem accordingly
 coupling_expression = precice.create_coupling_expression()
-read_data = precice.read_data()
-precice.update_coupling_expression(coupling_expression, read_data)
 if problem is ProblemType.DIRICHLET:
     # modify Dirichlet boundary condition on coupling interface
-    dofs_coupling = locate_dofs_geometrical(V, coupling_boundary)
-    bcs.append(dirichletbc(coupling_expression, dofs_coupling))
+    bc_coup = fem.dirichletbc(coupling_expression, dofs_coupling)
+    bcs.append(bc_coup)
 if problem is ProblemType.NEUMANN:
     # modify Neumann boundary condition on coupling interface, modify weak
     # form correspondingly
-    F += v * coupling_expression * ds
+    F += coupling_expression * v  * ufl.ds
 
-a, L = lhs(F), rhs(F)
+a = fem.form(ufl.lhs(F))
+L = fem.form(ufl.rhs(F))
 
-# Time-stepping
-u_np1 = Function(V, name="Temperature")
-t = 0
+# ## Create the matrix and vector for the linear problem
+# To ensure that we are solving the variational problem efficiently, we
+# will create several structures which can reuse data, such as matrix
+# sparisty patterns. Especially note as the bilinear form `a` is
+# independent of time, we only need to assemble the matrix once.
 
-# reference solution at t=0
-u_ref = Function(V, name="reference")
-u_ref.interpolate(u_D_function)
+A = assemble_matrix(a, bcs=bcs)
+A.assemble()
+b = create_vector(L)
+uh = fem.Function(V)
 
-# Generating output files
-temperature_out = XDMFFile(MPI.COMM_WORLD, f"./output/{precice.get_participant_name()}.xdmf", "w")
-temperature_out.write_mesh(mesh)
-ref_out = XDMFFile(MPI.COMM_WORLD, f"./output/ref{precice.get_participant_name()}.xdmf", "w")
-ref_out.write_mesh(mesh)
+# ## Define a linear variational solver
+# We will use [PETSc](https://www.mcs.anl.gov/petsc/) to solve the
+# resulting linear algebra problem. We use the Python-API `petsc4py` to
+# define the solver. We will use a linear solver.
 
-# output solution at t=0, n=0
-n = 0
-
-temperature_out.write_function(u_n, t)
-ref_out.write_function(u_ref, t)
-
-u_D.t = t + dt.value
-u_D_function.interpolate(u_D.eval)
-f.t = t + dt.value
-f_function.interpolate(f.eval)
+solver = PETSc.KSP().create(domain.comm)
+solver.setOperators(A)
+solver.setType(PETSc.KSP.Type.PREONLY)
+solver.getPC().setType(PETSc.PC.Type.LU)
 
 if problem is ProblemType.DIRICHLET:
-    flux = Function(V_g, name="Heat-Flux")
+    flux = fem.Function(V_g)
 
+# boundaries point as always to the end of the timestep
+u_exact.t += dt
+u_D.interpolate(u_exact)
+    
 while precice.is_coupling_ongoing():
 
-    # write checkpoint
-    if precice.is_action_required(precice.action_write_iteration_checkpoint()):
-        precice.store_checkpoint(u_n, t, n)
+    if precice.requires_writing_checkpoint():
+        precice.store_checkpoint(u_n, t, 0)
 
-    read_data = precice.read_data()
+    precice_dt = precice.get_max_time_step_size()
+    dt = np.min([fenics_dt, precice_dt])
 
-    # Update the coupling expression with the new read data
+    read_data = precice.read_data(dt)
+
+    # Update the right hand side reusing the initial vector
+    with b.localForm() as loc_b:
+        loc_b.set(0)
+    assemble_vector(b, L)
+    
     precice.update_coupling_expression(coupling_expression, read_data)
 
-    dt.value = np.min([fenics_dt, precice_dt])
+    # Apply Dirichlet boundary condition to the vector (according to the tutorial, the lifting operation is used to preserve the symmetry of the matrix)
+    # As far as I understood, the boundary condition bc is updated by
+    # u_D.interpolate above, since this function is wrapped into the bc object
+    apply_lifting(b, [a], [bcs])
+    set_bc(b, bcs)
 
-    linear_problem = LinearProblem(a, L, bcs=bcs)
-    u_np1 = linear_problem.solve()
+    # Solve linear problem
+    solver.solve(b, uh.x.petsc_vec)
 
     # Write data to preCICE according to which problem is being solved
     if problem is ProblemType.DIRICHLET:
         # Dirichlet problem reads temperature and writes flux on boundary to Neumann problem
-        flux = determine_gradient(V_g, u_np1)
-        flux_x = Function(W)
+        flux = determine_gradient(V_g, uh)
+        flux_x = fem.Function(W)
         flux_x.interpolate(flux.sub(0))
-        precice.write_data(flux_x)
+        #precice.write_data(flux_x)
+        precice.write_data(f_N)
     elif problem is ProblemType.NEUMANN:
         # Neumann problem reads flux and writes temperature on boundary to Dirichlet problem
-        precice.write_data(u_np1)
+        precice.write_data(uh)
 
-    precice_dt = precice.advance(dt.value)
+    precice.advance(dt)
+    precice_dt = precice.get_max_time_step_size()
 
     # roll back to checkpoint
-    if precice.is_action_required(precice.action_read_iteration_checkpoint()):
-        u_cp, t_cp, n_cp = precice.retrieve_checkpoint()
-        u_n.interpolate(u_cp)
+    if precice.requires_reading_checkpoint():
+        u_cp, t_cp, _ = precice.retrieve_checkpoint()
+        u_n.x.array[:] = u_cp.x.array
         t = t_cp
-        n = n_cp
     else:  # update solution
-        u_n.interpolate(u_np1)
-        t += dt.value
-        n += 1
+        # Update solution at previous time step (u_n)
+        u_n.x.array[:] = uh.x.array
+        t += float(dt)
 
     if precice.is_time_window_complete():
-        u_ref.interpolate(u_D_function)
-        error = compute_errors(u_n, u_ref, total_error_tol=error_tol)
-        print('n = %d, t = %.2f: L2 error on domain = %.3g' % (n, t, error))
-        print('output u^%d and u_ref^%d' % (n, n))
-
-        temperature_out.write_function(u_n, t)
-        ref_out.write_function(u_ref, t)
-
-    # Update Dirichlet BC
-    u_D.t = t + dt.value
-    u_D_function.interpolate(u_D.eval)
-    f.t = t + dt.value
-    f_function.interpolate(f.eval)
+        u_ref = fem.Function(V)
+        u_ref.interpolate(u_D)
+        error, error_pointwise = compute_errors(u_n, u_ref, total_error_tol=1)
+        print("t = %.2f: L2 error on domain = %.3g" % (t, error))
+        
+        # Update Dirichlet BC
+        u_exact.t += dt
+        u_D.interpolate(u_exact)
+        # TODO: update time dependent f (as soon as it is time dependent)!
 
 
-# Hold plot
 precice.finalize()
