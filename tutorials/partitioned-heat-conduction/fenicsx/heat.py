@@ -21,6 +21,7 @@ from errorcomputation import compute_errors
 from my_enums import ProblemType, DomainPart
 from problem_setup import get_geometry
 
+from dolfinx.io import VTXWriter
 
 def determine_gradient(V_g, u):
     """
@@ -65,7 +66,7 @@ elif participant_name == ProblemType.NEUMANN.value:
 
 # create domain and function space
 domain, coupling_boundary, remaining_boundary = get_geometry(domain_part)
-V = fem.functionspace(domain, ("Lagrange", 1))
+V = fem.functionspace(domain, ("Lagrange", 2))
 element = basix.ufl.element("Lagrange", domain.topology.cell_name(), 1, shape=(domain.geometry.dim,))
 V_g = fem.functionspace(domain, element)
 W, map_to_W = V_g.sub(0).collapse()
@@ -178,6 +179,10 @@ if problem is ProblemType.DIRICHLET:
 # boundaries point as always to the end of the timestep
 u_exact.t += dt
 u_D.interpolate(u_exact)
+
+# create writer for output files
+vtxwriter = VTXWriter(MPI.COMM_WORLD, f"output_{problem.name}.bp", [u_n])
+vtxwriter.write(t)
     
 while precice.is_coupling_ongoing():
 
@@ -229,6 +234,7 @@ while precice.is_coupling_ongoing():
         # Update solution at previous time step (u_n)
         u_n.x.array[:] = uh.x.array
         t += float(dt)
+        vtxwriter.write(t)
 
     if precice.is_time_window_complete():
         u_ref = fem.Function(V)
@@ -241,5 +247,6 @@ while precice.is_coupling_ongoing():
         u_D.interpolate(u_exact)
         # TODO: update time dependent f (as soon as it is time dependent)!
 
-
 precice.finalize()
+
+vtxwriter.close()
