@@ -147,7 +147,7 @@ if problem is ProblemType.DIRICHLET:
 if problem is ProblemType.NEUMANN:
     # modify Neumann boundary condition on coupling interface, modify weak
     # form correspondingly
-    F += coupling_expression * v  * ufl.ds
+    F += dt*coupling_expression * v * ufl.ds
 
 a = fem.form(ufl.lhs(F))
 L = fem.form(ufl.rhs(F))
@@ -216,8 +216,8 @@ while precice.is_coupling_ongoing():
         flux = determine_gradient(V_g, uh)
         flux_x = fem.Function(W)
         flux_x.interpolate(flux.sub(0))
-        #precice.write_data(flux_x)
-        precice.write_data(f_N)
+        precice.write_data(flux_x)
+        #precice.write_data(f_N)
     elif problem is ProblemType.NEUMANN:
         # Neumann problem reads flux and writes temperature on boundary to Dirichlet problem
         precice.write_data(uh)
