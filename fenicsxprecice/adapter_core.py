@@ -112,7 +112,7 @@ def convert_fenicsx_to_precice_coordinateBased(fenicsx_function, local_coords):
     # https://github.com/FEniCS/dolfinx/blob/main/python/test/unit/fem/test_function.py#L63
 
     # for fast function evaluation
-    bb_tree = geometry.bb_tree(mesh, mesh.geometry.dim)
+    bb_tree = geometry.bb_tree(mesh, mesh.geometry.dim) # TODO: as long as the domain didn't change, we could store that tree somewhere
     
     cells = []
     points = []
